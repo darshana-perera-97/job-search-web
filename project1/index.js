@@ -8,11 +8,34 @@ const SUMMARY_ONLY_OUTPUT = process.env.SUMMARY_ONLY_OUTPUT !== 'false';
 
 // Get Chrome executable path
 function getChromePath() {
-  const possiblePaths = [
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe')
-  ];
+  const envPath = process.env.CHROME_PATH;
+  if (envPath && fs.existsSync(envPath)) {
+    return envPath;
+  }
+
+  const platform = process.platform;
+  const possiblePaths = [];
+
+  if (platform === 'win32') {
+    possiblePaths.push(
+      'C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe',
+      'C:\\\\Program Files (x86)\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe',
+      path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe')
+    );
+  } else if (platform === 'darwin') {
+    possiblePaths.push(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      `${process.env.HOME || ''}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+    );
+  } else {
+    possiblePaths.push(
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/google-chrome',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/snap/bin/chromium'
+    );
+  }
   
   for (const chromePath of possiblePaths) {
     if (chromePath && fs.existsSync(chromePath)) {
@@ -62,12 +85,16 @@ function getChromeProfiles(userDataDir) {
   return profiles;
 }
 
-// Check if Chrome is running (Windows)
+// Check if Chrome is running
 function isChromeRunning() {
   try {
     const { execSync } = require('child_process');
-    const result = execSync('tasklist /FI "IMAGENAME eq chrome.exe"', { encoding: 'utf8' });
-    return result.includes('chrome.exe');
+    if (process.platform === 'win32') {
+      const result = execSync('tasklist /FI "IMAGENAME eq chrome.exe"', { encoding: 'utf8' });
+      return result.includes('chrome.exe');
+    }
+    const result = execSync('pgrep -x chrome || pgrep -x chromium', { encoding: 'utf8' });
+    return result.trim().length > 0;
   } catch (e) {
     return false;
   }
