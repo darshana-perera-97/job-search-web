@@ -1,10 +1,12 @@
 
 const puppeteer = require('puppeteer');
+const express = require('express');
 const path = require('path');
 const fs = require('fs');
 
 // Default to summary-only output unless explicitly disabled
 const SUMMARY_ONLY_OUTPUT = process.env.SUMMARY_ONLY_OUTPUT !== 'false';
+const DEFAULT_SEARCH_QUERY = 'Software Engineer vacancies in Sri Lanka';
 
 function shouldUseHeadlessChrome() {
   if (process.env.FORCE_HEADFUL === 'true') {
@@ -117,14 +119,48 @@ function isChromeRunning() {
 }
 
 // Open Chrome with first profile and perform Google search
-async function openChromeAndSearch() {
+async function openChromeAndSearch(options = {}) {
+  const {
+    searchQuery = DEFAULT_SEARCH_QUERY,
+    summaryOnly = SUMMARY_ONLY_OUTPUT,
+    keepBrowserOpenMs: keepAliveInput,
+    headless: headlessOverride
+  } = options || {};
+  const keepBrowserOpenMs = typeof keepAliveInput === 'number'
+    ? keepAliveInput
+    : (summaryOnly ? 0 : 60000);
   const chromePath = getChromePath();
   const userDataDir = getChromeUserDataDir();
-  const useHeadless = shouldUseHeadlessChrome();
+  const useHeadless = typeof headlessOverride === 'boolean'
+    ? headlessOverride
+    : shouldUseHeadlessChrome();
+  const report = {
+    searchQuery,
+    summaryOnly,
+    headless: useHeadless,
+    metadata: {
+      chromePath,
+      userDataDir,
+      profile: null
+    },
+    availableTabs: [],
+    highlightedTexts: [],
+    jobs: [],
+    jobsFound: 0,
+    jobTextBlocks: [],
+    openedJobLinks: [],
+    openedJobDetails: [],
+    timestamps: {
+      startedAt: new Date().toISOString(),
+      completedAt: null
+    },
+    lastPageUrl: null
+  };
   
   if (!chromePath) {
-    console.error('Chrome not found! Please install Google Chrome.');
-    return;
+    const error = new Error('Chrome not found! Please install Google Chrome.');
+    console.error(error.message);
+    throw error;
   }
   
   // Check if Chrome is running
@@ -140,6 +176,20 @@ async function openChromeAndSearch() {
   // Get list of profiles and use Profile 1
   let selectedProfile = null;
   let browser;
+  const closeBrowser = async () => {
+    if (browser) {
+      try {
+        await browser.close();
+        console.log('Browser closed.');
+      } catch (closeError) {
+        console.log('Failed to close browser:', closeError.message);
+      } finally {
+        browser = null;
+      }
+    }
+  };
+  
+  try {
   
   if (userDataDir) {
     const profiles = getChromeProfiles(userDataDir);
@@ -155,6 +205,7 @@ async function openChromeAndSearch() {
       console.log('Profile 1 not found. Using first available profile:', selectedProfile);
     }
   }
+  report.metadata.profile = selectedProfile;
   
   console.log('Chrome path:', chromePath);
   if (userDataDir) {
@@ -349,7 +400,6 @@ async function openChromeAndSearch() {
   }
   
   // Perform search with more realistic typing
-  const searchQuery = 'Software Engineer vacancies in Sri Lanka';
   console.log(`Searching for: "${searchQuery}"`);
   
   // Wait for search box and type with random delays
@@ -441,6 +491,7 @@ async function openChromeAndSearch() {
     
     return tabs;
   });
+  report.availableTabs = availableTabs;
   
   if (availableTabs.length > 0) {
     console.log(`Found ${availableTabs.length} tabs:\n`);
@@ -628,6 +679,7 @@ async function openChromeAndSearch() {
     });
     return texts;
   });
+  report.highlightedTexts = tNxQIbTexts;
   
   if (tNxQIbTexts.length > 0) {
     console.log(`Found ${tNxQIbTexts.length} elements with class "tNxQIb PUpOsf":\n`);
@@ -939,6 +991,27 @@ async function openChromeAndSearch() {
       return searchResults; // Return all results
     });
   }
+  report.jobs = results;
+  report.jobsFound = results.length;
+
+  // Fetch Google search link for each job (title + company)
+  for (const job of results) {
+    if (job.searchResult) {
+      continue;
+    }
+    const queryParts = [job.title, job.company].filter(Boolean);
+    if (!queryParts.length) {
+      continue;
+    }
+    try {
+      const searchResultLink = await getFirstGoogleResultLink(queryParts.join(' '));
+      if (searchResultLink) {
+        job.searchResult = searchResultLink;
+      }
+    } catch (searchErr) {
+      console.log(`Failed to fetch search result for job "${queryParts.join(' ')}": ${searchErr.message}`);
+    }
+  }
   
   // Print all jobs to terminal with summary information only
   if (results.length === 0) {
@@ -953,23 +1026,16 @@ async function openChromeAndSearch() {
       console.log(`Title: ${result.title || 'N/A'}`);
       console.log(`Company: ${result.company || 'N/A'}`);
       console.log(`Location: ${result.location || 'N/A'}`);
-      
-      const searchQueryParts = [result.title, result.company].filter(Boolean);
-      if (searchQueryParts.length) {
-        const searchLink = await getFirstGoogleResultLink(searchQueryParts.join(' '));
-        console.log(`Search Result: ${searchLink || 'N/A'}`);
-      } else {
-        console.log('Search Result: N/A');
-      }
-      
+      console.log(`Search Result: ${result.searchResult || 'N/A'}`);
       console.log('---------');
     }
   }
   
-  if (SUMMARY_ONLY_OUTPUT) {
-    await browser.close();
-    console.log('Browser closed.');
-    return;
+  if (summaryOnly) {
+    report.lastPageUrl = page.url();
+    report.timestamps.completedAt = new Date().toISOString();
+    await closeBrowser();
+    return report;
   }
   
   // Sequentially click each job tab to load its details
@@ -1183,6 +1249,8 @@ async function openChromeAndSearch() {
     });
     console.log('========================================\n');
   }
+  report.openedJobLinks = openedJobLinks;
+  report.openedJobDetails = openedJobDetails;
   
   // Print every visible job text block to the terminal
   console.log('\nCollecting full text for every listed job...\n');
@@ -1248,6 +1316,7 @@ async function openChromeAndSearch() {
       });
       return items;
     });
+    report.jobTextBlocks = allJobTexts;
     
     if (!allJobTexts.length) {
       console.log('No job text blocks detected. The layout may have changed.');
@@ -1272,14 +1341,72 @@ async function openChromeAndSearch() {
     console.log('Failed to gather job text blocks:', textError.message);
   }
   
-  // Keep browser open for 60 seconds so user can see the full jobs page
-  console.log('Browser will stay open for 60 seconds. You can view the full jobs page.');
-  console.log('Current page URL:', page.url());
-  await page.waitForTimeout(60000);
+  if (keepBrowserOpenMs > 0) {
+    console.log(`Browser will stay open for ${Math.round(keepBrowserOpenMs / 1000)} seconds. You can view the full jobs page.`);
+    console.log('Current page URL:', page.url());
+    await page.waitForTimeout(keepBrowserOpenMs);
+  } else {
+    console.log('API/headless mode complete. Closing browser immediately.');
+  }
   
-  await browser.close();
-  console.log('Browser closed.');
+  report.lastPageUrl = page.url();
+  report.timestamps.completedAt = new Date().toISOString();
+  await closeBrowser();
+  return report;
+} catch (error) {
+  await closeBrowser();
+  throw error;
+}
 }
 
-// Run the function
-openChromeAndSearch().catch(console.error);
+const app = express();
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+const PORT = parseInt(process.env.PORT, 10) || 5005;
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.post('/api/jobs/search', async (req, res) => {
+  const body = req.body || {};
+  const query = (body.query || '').trim();
+
+  try {
+    const data = await openChromeAndSearch({
+      searchQuery: query || DEFAULT_SEARCH_QUERY,
+      summaryOnly: true,
+      keepBrowserOpenMs: 0
+    });
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Job search API error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to run job search'
+    });
+  }
+});
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/api', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Job search automation API listening on port ${PORT}`);
+  });
+}
+
+module.exports = {
+  app,
+  openChromeAndSearch
+};
