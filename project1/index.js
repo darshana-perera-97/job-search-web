@@ -6,6 +6,22 @@ const fs = require('fs');
 // Default to summary-only output unless explicitly disabled
 const SUMMARY_ONLY_OUTPUT = process.env.SUMMARY_ONLY_OUTPUT !== 'false';
 
+function shouldUseHeadlessChrome() {
+  if (process.env.FORCE_HEADFUL === 'true') {
+    return false;
+  }
+  if (process.env.FORCE_HEADLESS === 'true') {
+    return true;
+  }
+  if (process.env.CI === 'true') {
+    return true;
+  }
+  if (process.platform !== 'win32' && !process.env.DISPLAY) {
+    return true;
+  }
+  return false;
+}
+
 // Get Chrome executable path
 function getChromePath() {
   const envPath = process.env.CHROME_PATH;
@@ -104,6 +120,7 @@ function isChromeRunning() {
 async function openChromeAndSearch() {
   const chromePath = getChromePath();
   const userDataDir = getChromeUserDataDir();
+  const useHeadless = shouldUseHeadlessChrome();
   
   if (!chromePath) {
     console.error('Chrome not found! Please install Google Chrome.');
@@ -116,6 +133,10 @@ async function openChromeAndSearch() {
     console.log('Attempting to launch anyway...');
   }
   
+  if (useHeadless) {
+    console.log('No active display detected. Running Chrome in headless mode.');
+  }
+
   // Get list of profiles and use Profile 1
   let selectedProfile = null;
   let browser;
@@ -140,22 +161,30 @@ async function openChromeAndSearch() {
     console.log('User data dir:', userDataDir);
   }
   
-  // Try to launch Chrome with Profile 1
-  if (userDataDir && selectedProfile) {
+  const baseArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-blink-features=AutomationControlled',
+    '--disable-dev-shm-usage',
+    '--disable-features=IsolateOrigins,site-per-process',
+    ...(useHeadless ? ['--disable-gpu'] : [])
+  ];
+
+  const createLaunchOptions = (extraArgs = []) => ({
+    headless: useHeadless ? 'new' : false,
+    executablePath: chromePath,
+    args: [...extraArgs, ...baseArgs]
+  });
+
+  // Try to launch Chrome with Profile 1 when running headful
+  if (!useHeadless && userDataDir && selectedProfile) {
     try {
-      browser = await puppeteer.launch({
-        headless: false,
-        executablePath: chromePath,
-        args: [
+      browser = await puppeteer.launch(
+        createLaunchOptions([
           `--user-data-dir=${userDataDir}`,
-          `--profile-directory=${selectedProfile}`,
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-blink-features=AutomationControlled',
-          '--disable-dev-shm-usage',
-          '--disable-features=IsolateOrigins,site-per-process'
-        ]
-      });
+          `--profile-directory=${selectedProfile}`
+        ])
+      );
       console.log('Chrome launched successfully with profile:', selectedProfile);
     } catch (profileError) {
       console.log('Failed to launch with existing profile:', profileError.message);
@@ -163,17 +192,7 @@ async function openChromeAndSearch() {
       
       // Fallback to temporary profile
       try {
-        browser = await puppeteer.launch({
-          headless: false,
-          executablePath: chromePath,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled',
-            '--disable-dev-shm-usage',
-            '--disable-features=IsolateOrigins,site-per-process'
-          ]
-        });
+        browser = await puppeteer.launch(createLaunchOptions());
         console.log('Chrome launched successfully with temporary profile');
       } catch (tempError) {
         console.error('Failed to launch Chrome:', tempError.message);
@@ -182,18 +201,12 @@ async function openChromeAndSearch() {
     }
   } else {
     // Launch without profile
-    browser = await puppeteer.launch({
-      headless: false,
-      executablePath: chromePath,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-dev-shm-usage',
-        '--disable-features=IsolateOrigins,site-per-process'
-      ]
-    });
-    console.log('Chrome launched successfully with temporary profile');
+    browser = await puppeteer.launch(createLaunchOptions());
+    console.log(
+      useHeadless
+        ? 'Chrome launched headlessly with temporary profile'
+        : 'Chrome launched successfully with temporary profile'
+    );
   }
   
   const page = await browser.newPage();
